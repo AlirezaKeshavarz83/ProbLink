@@ -1,0 +1,7 @@
+name = "problink"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+[[kv_namespaces]]
+binding = "TITLES"
+id = "b062b6f89bb54fd9bca2a596ae2562fb"

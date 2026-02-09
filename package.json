@@ -1,0 +1,20 @@
+{
+  "name": "problink",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "tsc --noEmit",
+    "cache:atc:fill": "node scripts/fill-atcoder-cache.mjs --remote --binding TITLES",
+    "cache:atc:fill:dry": "node scripts/fill-atcoder-cache.mjs --dry-run --binding TITLES",
+    "cache:cf:fill": "node scripts/fill-codeforces-cache.mjs --remote --binding TITLES",
+    "cache:cf:fill:dry": "node scripts/fill-codeforces-cache.mjs --dry-run --binding TITLES"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260129.0",
+    "typescript": "^5.7.3",
+    "wrangler": "^4.1.0"
+  }
+}

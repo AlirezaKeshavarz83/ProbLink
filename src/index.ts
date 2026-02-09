@@ -1,0 +1,434 @@
+interface Env {
+  BOT_TOKEN: string;
+  WEBHOOK_SECRET: string;
+  ADMIN_CHAT_ID: string;
+  TITLES: KVNamespace;
+}
+
+type Platform = 'CF' | 'ATC';
+
+interface ResolvedQuery {
+  platform: Platform;
+  normalized: string;
+  url: string;
+  cfContestId?: string;
+  cfIndex?: string;
+  atcContestId?: string;
+  atcIndex?: string;
+}
+
+interface CodeforcesProblem {
+  index: string;
+  name: string;
+}
+
+interface AtcoderProblem {
+  contest_id?: string;
+  problem_index?: string;
+  name?: string;
+  title?: string;
+}
+
+interface TelegramInlineQuery {
+  id: string;
+  from: {
+    id: number;
+    username?: string;
+    first_name?: string;
+    last_name?: string;
+  };
+  query: string;
+}
+
+interface TelegramChosenInlineResult {
+  result_id: string;
+  from: {
+    id: number;
+    username?: string;
+    first_name?: string;
+    last_name?: string;
+  };
+  query: string;
+}
+
+interface TelegramUpdate {
+  inline_query?: TelegramInlineQuery;
+  chosen_inline_result?: TelegramChosenInlineResult;
+}
+
+interface PendingLog {
+  userId: number;
+  username?: string;
+  platform: Platform;
+  displayTitle: string;
+  url: string;
+}
+
+const INLINE_CACHE_SECONDS = 1;
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    try {
+      const url = new URL(request.url);
+
+      if (request.method === 'GET' && url.pathname === '/health') {
+        return text('ok');
+      }
+
+      if (request.method === 'POST' && url.pathname === '/set-webhook') {
+        return await handleSetWebhook(request, env);
+      }
+
+      if (request.method === 'POST' && url.pathname === '/webhook') {
+        requireEnv(env, ['BOT_TOKEN', 'WEBHOOK_SECRET', 'ADMIN_CHAT_ID']);
+        const ok = verifyWebhookSecret(request, env.WEBHOOK_SECRET);
+        if (!ok) {
+          return json({ ok: false, error: 'unauthorized' }, 401);
+        }
+
+        const update = (await request.json()) as TelegramUpdate;
+
+        if (update.inline_query) {
+          ctx.waitUntil(handleInlineQuery(update.inline_query, env, ctx));
+        }
+        if (update.chosen_inline_result) {
+          ctx.waitUntil(handleChosenInlineResult(update.chosen_inline_result, env));
+        }
+
+        return json({ ok: true });
+      }
+
+      return json({ ok: false, error: 'not_found' }, 404);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'unknown error';
+      return json({ ok: false, error: message }, 500);
+    }
+  },
+};
+
+async function handleSetWebhook(request: Request, env: Env): Promise<Response> {
+  requireEnv(env, ['BOT_TOKEN', 'WEBHOOK_SECRET']);
+  const url = new URL(request.url);
+  const dropPending = (url.searchParams.get('drop_pending_updates') ?? 'false') === 'true';
+  const webhookUrl = `${url.origin}/webhook`;
+
+  const payload = {
+    url: webhookUrl,
+    secret_token: env.WEBHOOK_SECRET,
+    allowed_updates: ['inline_query', 'chosen_inline_result'],
+    drop_pending_updates: dropPending,
+  };
+
+  const data = await telegramApi(env, 'setWebhook', payload);
+  return json(data);
+}
+
+async function handleInlineQuery(
+  inlineQuery: TelegramInlineQuery,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<void> {
+  const resolved = parseAndResolveQuery(inlineQuery.query);
+
+  if (!resolved) {
+    await telegramApi(env, 'answerInlineQuery', {
+      inline_query_id: inlineQuery.id,
+      results: [],
+      cache_time: INLINE_CACHE_SECONDS,
+      is_personal: true,
+    });
+    return;
+  }
+
+  const displayTitle = await buildDisplayTitle(env, resolved);
+
+  const markdownLink = `[${displayTitle}](${resolved.url})`;
+  const text = `${markdownLink}`;
+  const resultId = buildResultId(resolved.platform, resolved.normalized);
+
+  const article = {
+    type: 'article',
+    id: resultId,
+    title: displayTitle,
+    description: resolved.url,
+    input_message_content: {
+      message_text: text,
+      parse_mode: 'Markdown',
+      disable_web_page_preview: true,
+    },
+  };
+
+  await telegramApi(env, 'answerInlineQuery', {
+    inline_query_id: inlineQuery.id,
+    results: [article],
+    cache_time: INLINE_CACHE_SECONDS,
+    is_personal: true,
+  });
+
+}
+
+async function handleChosenInlineResult(chosen: TelegramChosenInlineResult, env: Env): Promise<void> {
+  const resolved = parseAndResolveQuery(chosen.query);
+  if (!resolved) {
+    return;
+  }
+
+  await logAdminUsage(env, {
+    userId: chosen.from.id,
+    username: chosen.from.username,
+    platform: resolved.platform,
+    displayTitle: resolved.normalized,
+    url: resolved.url,
+  });
+}
+
+function parseAndResolveQuery(raw: string): ResolvedQuery | null {
+  const q = raw.trim();
+
+  const cfMatch = /^([0-9]+)([a-z][0-9]*)$/i.exec(q);
+  if (cfMatch) {
+    const contestId = cfMatch[1];
+    const problemIndex = cfMatch[2].toUpperCase();
+    return {
+      platform: 'CF',
+      normalized: `${contestId}${problemIndex}`,
+      url: `https://codeforces.com/contest/${contestId}/problem/${problemIndex}`,
+      cfContestId: contestId,
+      cfIndex: problemIndex,
+    };
+  }
+
+  const atcCanonical = /^(abc|arc|agc)([0-9]+)_([a-z])$/i.exec(q);
+  if (atcCanonical) {
+    const contest = `${atcCanonical[1].toLowerCase()}${atcCanonical[2]}`;
+    const letter = atcCanonical[3].toLowerCase();
+    const normalized = `${contest}_${letter}`;
+    return {
+      platform: 'ATC',
+      normalized,
+      url: `https://atcoder.jp/contests/${contest}/tasks/${normalized}`,
+      atcContestId: contest,
+      atcIndex: letter,
+    };
+  }
+
+  const atcCompact = /^(abc|arc|agc)([0-9]+)([a-z])$/i.exec(q);
+  if (atcCompact) {
+    const contest = `${atcCompact[1].toLowerCase()}${atcCompact[2]}`;
+    const letter = atcCompact[3].toLowerCase();
+    const normalized = `${contest}_${letter}`;
+    return {
+      platform: 'ATC',
+      normalized,
+      url: `https://atcoder.jp/contests/${contest}/tasks/${normalized}`,
+      atcContestId: contest,
+      atcIndex: letter,
+    };
+  }
+
+  return null;
+}
+
+async function getCodeforcesTitle(env: Env, contestId: string, index: string): Promise<string | null> {
+  const contestKey = `cf:${contestId}`;
+  const normalizedIndex = index.toUpperCase();
+  const cachedContest = await env.TITLES.get(contestKey);
+  if (cachedContest) {
+    try {
+      const cachedMap = JSON.parse(cachedContest) as Record<string, string>;
+      return cachedMap[normalizedIndex] ?? null;
+    } catch {
+      console.warn(`Invalid JSON in KV for ${contestKey}; refreshing from source.`);
+    }
+  }
+
+  const apiUrl = new URL('https://codeforces.com/api/contest.standings');
+  apiUrl.searchParams.set('contestId', contestId);
+  apiUrl.searchParams.set('from', '1');
+  apiUrl.searchParams.set('count', '1');
+
+  const res = await fetch(apiUrl.toString(), {
+    headers: {
+      'User-Agent': 'ProbLinkBot/1.0 (+Cloudflare-Worker)',
+    },
+  });
+
+  if (!res.ok) {
+    return null;
+  }
+
+  const body = (await res.json()) as {
+    status?: string;
+    result?: { problems?: CodeforcesProblem[] };
+  };
+
+  if (body.status !== 'OK' || !body.result?.problems?.length) {
+    return null;
+  }
+
+  const contestMap: Record<string, string> = {};
+  for (const problem of body.result.problems) {
+    contestMap[problem.index.toUpperCase()] = problem.name;
+  }
+
+  if (Object.keys(contestMap).length > 0) {
+    await putKvSafe(env.TITLES, contestKey, JSON.stringify(contestMap), 'Codeforces contest cache');
+  }
+
+  return contestMap[normalizedIndex] ?? null;
+}
+
+async function getAtcoderTitle(env: Env, contestId: string, index: string): Promise<string | null> {
+  const contestKey = `atc:${contestId}`;
+  const normalizedIndex = index.toLowerCase();
+  const cachedContest = await env.TITLES.get(contestKey);
+  if (cachedContest) {
+    try {
+      const cachedMap = JSON.parse(cachedContest) as Record<string, string>;
+      return cachedMap[normalizedIndex] ?? null;
+    } catch {
+      console.warn(`Invalid JSON in KV for ${contestKey}; refreshing from source.`);
+    }
+  }
+
+  const res = await fetch('https://kenkoooo.com/atcoder/resources/problems.json', {
+    headers: {
+      'User-Agent': 'ProbLinkBot/1.0 (+Cloudflare-Worker)',
+    },
+  });
+  if (!res.ok) {
+    return null;
+  }
+
+  const problems = (await res.json()) as AtcoderProblem[];
+  const contestMap: Record<string, string> = {};
+  for (const problem of problems) {
+    if (problem.contest_id !== contestId) {
+      continue;
+    }
+
+    const problemIndex = (problem.problem_index ?? '').toLowerCase();
+    if (!/^[a-z]$/.test(problemIndex)) {
+      continue;
+    }
+
+    const problemName = (problem.name ?? problem.title ?? '').trim();
+    if (!problemName) {
+      continue;
+    }
+
+    contestMap[problemIndex] = problemName;
+  }
+
+  if (Object.keys(contestMap).length > 0) {
+    await putKvSafe(env.TITLES, contestKey, JSON.stringify(contestMap), 'AtCoder contest cache');
+  }
+
+  return contestMap[normalizedIndex] ?? null;
+}
+
+async function logAdminUsage(env: Env, data: PendingLog): Promise<void> {
+  const userTag = data.username ? `@${escapeMarkdown(data.username)}` : '(no username)';
+  const markdownLink = `[${data.displayTitle}](${data.url})`;
+  const text =
+    `👤 ${userTag} (\`${data.userId}\`)\n` +
+    `📘 *${data.platform}*\n` +
+    `${markdownLink}`;
+
+  await telegramApi(env, 'sendMessage', {
+    chat_id: env.ADMIN_CHAT_ID,
+    text,
+    parse_mode: 'Markdown',
+    disable_web_page_preview: true,
+  });
+}
+
+function verifyWebhookSecret(request: Request, expected: string): boolean {
+  const got = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
+  return Boolean(got && got === expected);
+}
+
+function buildResultId(platform: Platform, normalized: string): string {
+  return `${platform}:${normalized}`;
+}
+
+async function telegramApi(env: Env, method: string, payload: unknown): Promise<unknown> {
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const data = (await res.json()) as { ok: boolean; description?: string };
+  if (!res.ok || !data.ok) {
+    throw new Error(`Telegram API ${method} failed: ${data.description ?? res.statusText}`);
+  }
+  return data;
+}
+
+function text(body: string, status = 200): Response {
+  return new Response(body, {
+    status,
+    headers: {
+      'content-type': 'text/plain; charset=utf-8',
+    },
+  });
+}
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+    },
+  });
+}
+
+function escapeMarkdown(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/\*/g, '\\*')
+    .replace(/_/g, '\\_')
+    .replace(/\[/g, '\\[')
+    .replace(/`/g, '\\`');
+}
+
+async function buildDisplayTitle(env: Env, resolved: ResolvedQuery): Promise<string> {
+  if (resolved.platform === 'CF') {
+    const title = await getCodeforcesTitle(env, resolved.cfContestId as string, resolved.cfIndex as string);
+    return `${resolved.normalized.toUpperCase()} - ${title ?? 'Problem'}`;
+  }
+
+  const title = await getAtcoderTitle(env, resolved.atcContestId as string, resolved.atcIndex as string);
+  if (title) {
+    return `${resolved.normalized} - ${title}`;
+  }
+
+  return resolved.normalized;
+}
+
+function requireEnv(env: Env, keys: Array<keyof Env>): void {
+  for (const key of keys) {
+    if (!env[key]) {
+      throw new Error(`missing required env: ${key}`);
+    }
+  }
+}
+
+async function putKvSafe(
+  kv: KVNamespace,
+  key: string,
+  value: string,
+  context: string,
+  options?: KVNamespacePutOptions,
+): Promise<void> {
+  try {
+    await kv.put(key, value, options);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`KV write skipped (${context}) for key "${key}": ${message}`);
+  }
+}
