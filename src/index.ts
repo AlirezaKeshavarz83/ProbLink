@@ -198,9 +198,9 @@ function parseAndResolveQuery(raw: string): ResolvedQuery | null {
     };
   }
 
-  const atcCanonical = /^(abc|arc|agc)([0-9]+)_([a-z])$/i.exec(q);
+  const atcCanonical = /^(abc|arc|agc|ahc|apc)([0-9]{1,3})_([a-z])$/i.exec(q);
   if (atcCanonical) {
-    const contest = `${atcCanonical[1].toLowerCase()}${atcCanonical[2]}`;
+    const contest = normalizeAtcoderContest(atcCanonical[1], atcCanonical[2]);
     const letter = atcCanonical[3].toLowerCase();
     const normalized = `${contest}_${letter}`;
     return {
@@ -212,9 +212,9 @@ function parseAndResolveQuery(raw: string): ResolvedQuery | null {
     };
   }
 
-  const atcCompact = /^(abc|arc|agc)([0-9]+)([a-z])$/i.exec(q);
+  const atcCompact = /^(abc|arc|agc|ahc|apc)([0-9]{1,3})([a-z])$/i.exec(q);
   if (atcCompact) {
-    const contest = `${atcCompact[1].toLowerCase()}${atcCompact[2]}`;
+    const contest = normalizeAtcoderContest(atcCompact[1], atcCompact[2]);
     const letter = atcCompact[3].toLowerCase();
     const normalized = `${contest}_${letter}`;
     return {
@@ -227,6 +227,10 @@ function parseAndResolveQuery(raw: string): ResolvedQuery | null {
   }
 
   return null;
+}
+
+function normalizeAtcoderContest(prefix: string, contestNumber: string): string {
+  return `${prefix.toLowerCase()}${contestNumber.padStart(3, '0')}`;
 }
 
 async function getCodeforcesTitle(env: Env, contestId: string, index: string): Promise<string | null> {

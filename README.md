@@ -26,8 +26,14 @@ Input pattern: `<contestId><problemIndex>`
 
 Accepted forms:
 
-- canonical: `abc150_d`, `arc173_a`, `agc066_f`
-- compact: `abc150d` (normalized internally to `abc150_d`)
+- canonical: `abc150_d`, `arc173_a`, `agc066_f`, `ahc042_a`, `apc001_a`
+- compact: `abc150d`, `arc173a`, `agc066f`, `ahc042a`, `apc001a`
+
+Normalization rule:
+
+- prefixes `abc`, `arc`, `agc`, `ahc`, `apc` are preserved
+- contest number is normalized to exactly 3 digits by adding leading `0`s
+- examples: `abc10_d` -> `abc010_d`, `agc10_f` -> `agc010_f`
 
 URL output: `https://atcoder.jp/contests/{contest}/tasks/{contest}_{letter}`
 
