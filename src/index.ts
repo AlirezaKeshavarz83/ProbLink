@@ -64,7 +64,7 @@ interface PendingLog {
   url: string;
 }
 
-const INLINE_CACHE_SECONDS = 1;
+const INLINE_CACHE_SECONDS = 300;
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
