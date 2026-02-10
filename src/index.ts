@@ -151,6 +151,7 @@ async function handleInlineQuery(
     id: resultId,
     title: displayTitle,
     description: resolved.url,
+    thumbnail_url: getInlineThumbnailUrl(resolved.platform),
     input_message_content: {
       message_text: text,
       parse_mode: 'Markdown',
@@ -354,6 +355,13 @@ function verifyWebhookSecret(request: Request, expected: string): boolean {
 
 function buildResultId(platform: Platform, normalized: string): string {
   return `${platform}:${normalized}`;
+}
+
+function getInlineThumbnailUrl(platform: Platform): string {
+  if (platform === 'CF') {
+    return 'https://www.google.com/s2/favicons?sz=128&domain=codeforces.com';
+  }
+  return 'https://www.google.com/s2/favicons?sz=128&domain=atcoder.jp';
 }
 
 async function telegramApi(env: Env, method: string, payload: unknown): Promise<unknown> {
