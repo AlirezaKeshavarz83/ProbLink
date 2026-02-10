@@ -65,6 +65,7 @@ interface PendingLog {
 }
 
 const INLINE_CACHE_SECONDS = 300;
+const INLINE_MAX_RESULTS = 50;
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -128,6 +129,30 @@ async function handleInlineQuery(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<void> {
+  const contestIdQuery = parseCodeforcesContestQuery(inlineQuery.query);
+  if (contestIdQuery) {
+    const results = await buildCodeforcesContestInlineResults(env, contestIdQuery);
+    await telegramApi(env, 'answerInlineQuery', {
+      inline_query_id: inlineQuery.id,
+      results,
+      cache_time: INLINE_CACHE_SECONDS,
+      is_personal: true,
+    });
+    return;
+  }
+
+  const atcoderContestQuery = parseAtcoderContestQuery(inlineQuery.query);
+  if (atcoderContestQuery) {
+    const results = await buildAtcoderContestInlineResults(env, atcoderContestQuery);
+    await telegramApi(env, 'answerInlineQuery', {
+      inline_query_id: inlineQuery.id,
+      results,
+      cache_time: INLINE_CACHE_SECONDS,
+      is_personal: true,
+    });
+    return;
+  }
+
   const resolved = parseAndResolveQuery(inlineQuery.query);
 
   if (!resolved) {
@@ -169,7 +194,7 @@ async function handleInlineQuery(
 }
 
 async function handleChosenInlineResult(chosen: TelegramChosenInlineResult, env: Env): Promise<void> {
-  const resolved = parseAndResolveQuery(chosen.query);
+  const resolved = parseChosenResult(chosen);
   if (!resolved) {
     return;
   }
@@ -181,6 +206,38 @@ async function handleChosenInlineResult(chosen: TelegramChosenInlineResult, env:
     displayTitle: resolved.normalized,
     url: resolved.url,
   });
+}
+
+function parseCodeforcesContestQuery(raw: string): string | null {
+  const trimmed = raw.trim();
+  const match = /^([0-9]+)$/.exec(trimmed);
+  if (!match) {
+    return null;
+  }
+  return match[1];
+}
+
+function parseAtcoderContestQuery(raw: string): string | null {
+  const trimmed = raw.trim();
+  const match = /^(abc|arc|agc|ahc|apc)([0-9]{1,3})$/i.exec(trimmed);
+  if (!match) {
+    return null;
+  }
+  return normalizeAtcoderContest(match[1], match[2]);
+}
+
+function parseChosenResult(chosen: TelegramChosenInlineResult): ResolvedQuery | null {
+  const parsedFromQuery = parseAndResolveQuery(chosen.query);
+  if (parsedFromQuery) {
+    return parsedFromQuery;
+  }
+
+  const resultIdMatch = /^(CF|ATC):(.+)$/.exec(chosen.result_id);
+  if (!resultIdMatch) {
+    return null;
+  }
+
+  return parseAndResolveQuery(resultIdMatch[2]);
 }
 
 function parseAndResolveQuery(raw: string): ResolvedQuery | null {
@@ -235,13 +292,16 @@ function normalizeAtcoderContest(prefix: string, contestNumber: string): string 
 }
 
 async function getCodeforcesTitle(env: Env, contestId: string, index: string): Promise<string | null> {
+  const contestMap = await getCodeforcesContestMap(env, contestId);
+  return contestMap[index.toUpperCase()] ?? null;
+}
+
+async function getCodeforcesContestMap(env: Env, contestId: string): Promise<Record<string, string>> {
   const contestKey = `cf:${contestId}`;
-  const normalizedIndex = index.toUpperCase();
   const cachedContest = await env.TITLES.get(contestKey);
   if (cachedContest) {
     try {
-      const cachedMap = JSON.parse(cachedContest) as Record<string, string>;
-      return cachedMap[normalizedIndex] ?? null;
+      return JSON.parse(cachedContest) as Record<string, string>;
     } catch {
       console.warn(`Invalid JSON in KV for ${contestKey}; refreshing from source.`);
     }
@@ -259,7 +319,7 @@ async function getCodeforcesTitle(env: Env, contestId: string, index: string): P
   });
 
   if (!res.ok) {
-    return null;
+    return {};
   }
 
   const body = (await res.json()) as {
@@ -268,7 +328,7 @@ async function getCodeforcesTitle(env: Env, contestId: string, index: string): P
   };
 
   if (body.status !== 'OK' || !body.result?.problems?.length) {
-    return null;
+    return {};
   }
 
   const contestMap: Record<string, string> = {};
@@ -280,17 +340,20 @@ async function getCodeforcesTitle(env: Env, contestId: string, index: string): P
     await putKvSafe(env.TITLES, contestKey, JSON.stringify(contestMap), 'Codeforces contest cache');
   }
 
-  return contestMap[normalizedIndex] ?? null;
+  return contestMap;
 }
 
 async function getAtcoderTitle(env: Env, contestId: string, index: string): Promise<string | null> {
+  const contestMap = await getAtcoderContestMap(env, contestId);
+  return contestMap[index.toLowerCase()] ?? null;
+}
+
+async function getAtcoderContestMap(env: Env, contestId: string): Promise<Record<string, string>> {
   const contestKey = `atc:${contestId}`;
-  const normalizedIndex = index.toLowerCase();
   const cachedContest = await env.TITLES.get(contestKey);
   if (cachedContest) {
     try {
-      const cachedMap = JSON.parse(cachedContest) as Record<string, string>;
-      return cachedMap[normalizedIndex] ?? null;
+      return JSON.parse(cachedContest) as Record<string, string>;
     } catch {
       console.warn(`Invalid JSON in KV for ${contestKey}; refreshing from source.`);
     }
@@ -302,7 +365,7 @@ async function getAtcoderTitle(env: Env, contestId: string, index: string): Prom
     },
   });
   if (!res.ok) {
-    return null;
+    return {};
   }
 
   const problems = (await res.json()) as AtcoderProblem[];
@@ -329,7 +392,7 @@ async function getAtcoderTitle(env: Env, contestId: string, index: string): Prom
     await putKvSafe(env.TITLES, contestKey, JSON.stringify(contestMap), 'AtCoder contest cache');
   }
 
-  return contestMap[normalizedIndex] ?? null;
+  return contestMap;
 }
 
 async function logAdminUsage(env: Env, data: PendingLog): Promise<void> {
@@ -420,6 +483,74 @@ async function buildDisplayTitle(env: Env, resolved: ResolvedQuery): Promise<str
   }
 
   return resolved.normalized;
+}
+
+async function buildCodeforcesContestInlineResults(
+  env: Env,
+  contestId: string,
+): Promise<Array<Record<string, unknown>>> {
+  const contestMap = await getCodeforcesContestMap(env, contestId);
+  const indexes = Object.keys(contestMap).sort(compareCodeforcesProblemIndexes).slice(0, INLINE_MAX_RESULTS);
+
+  return indexes.map((index) => {
+    const normalized = `${contestId}${index}`;
+    const url = `https://codeforces.com/contest/${contestId}/problem/${index}`;
+    const displayTitle = `${normalized} - ${contestMap[index]}`;
+    return {
+      type: 'article',
+      id: buildResultId('CF', normalized),
+      title: displayTitle,
+      description: url,
+      thumbnail_url: getInlineThumbnailUrl('CF'),
+      input_message_content: {
+        message_text: `[${displayTitle}](${url})`,
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true,
+      },
+    };
+  });
+}
+
+async function buildAtcoderContestInlineResults(
+  env: Env,
+  contestId: string,
+): Promise<Array<Record<string, unknown>>> {
+  const contestMap = await getAtcoderContestMap(env, contestId);
+  const indexes = Object.keys(contestMap).sort((a, b) => a.localeCompare(b)).slice(0, INLINE_MAX_RESULTS);
+
+  return indexes.map((index) => {
+    const normalized = `${contestId}_${index}`;
+    const url = `https://atcoder.jp/contests/${contestId}/tasks/${normalized}`;
+    const displayTitle = `${normalized} - ${contestMap[index]}`;
+    return {
+      type: 'article',
+      id: buildResultId('ATC', normalized),
+      title: displayTitle,
+      description: url,
+      thumbnail_url: getInlineThumbnailUrl('ATC'),
+      input_message_content: {
+        message_text: `[${displayTitle}](${url})`,
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true,
+      },
+    };
+  });
+}
+
+function compareCodeforcesProblemIndexes(a: string, b: string): number {
+  const aa = /^([A-Z])([0-9]*)$/.exec(a.toUpperCase());
+  const bb = /^([A-Z])([0-9]*)$/.exec(b.toUpperCase());
+  if (!aa || !bb) {
+    return a.localeCompare(b);
+  }
+
+  if (aa[1] !== bb[1]) {
+    return aa[1].localeCompare(bb[1]);
+  }
+
+  const an = aa[2] ? Number(aa[2]) : 0;
+  const bn = bb[2] ? Number(bb[2]) : 0;
+  return an - bn;
 }
 
 function requireEnv(env: Env, keys: Array<keyof Env>): void {

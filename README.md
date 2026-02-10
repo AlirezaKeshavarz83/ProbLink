@@ -22,12 +22,18 @@ Input pattern: `<contestId><problemIndex>`
 - examples: `150D`, `1775A1`, `1839C2`
 - URL output: `https://codeforces.com/contest/{contestId}/problem/{problemIndex}`
 
+Contest listing input:
+
+- `contestId` only (digits), example: `150`
+- returns multiple inline results for that contest's problems
+
 ### AtCoder
 
 Accepted forms:
 
 - canonical: `abc150_d`, `arc173_a`, `agc066_f`, `ahc042_a`, `apc001_a`
 - compact: `abc150d`, `arc173a`, `agc066f`, `ahc042a`, `apc001a`
+- contest listing: `abc150`, `arc173`, `agc066`, `ahc042`, `apc001` (returns contest problems)
 
 Normalization rule:
 
